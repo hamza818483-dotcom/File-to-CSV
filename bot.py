@@ -31,6 +31,8 @@ current_key_index  = 0
 exhausted_keys     = set()
 processing_queue   = asyncio.Queue()
 is_processing      = False
+BOT_VERSION        = "v3.0"
+BOT_BUILD          = "2026-06-05-A"
 
 # ============================================================
 # 2. UNICODE / LATEX MAPS
@@ -246,13 +248,23 @@ def fix_spacing(text):
     return text
 
 def fix_doubling(text):
-    """Remove duplicated expressions (same text appearing twice in a row)."""
-    # Pattern: any string followed immediately by itself (with optional space/punct)
+    """Remove duplicated expressions (MathJax rendered + raw, or identical adjacent)."""
+    text = text.replace('\ufeff', '')
+    # MathJax pattern: [rendered ×¹⁰X] [optional word] [raw ×10X] → keep raw + word
+    text = re.sub(
+        r'[\d.]+\s*×¹⁰[⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+\s*(টি|অণু|টা|টুকরা|গ্রাম|মোল|টিকে)?\s*([\d.]+×10[⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)',
+        lambda m: m.group(2) + (' ' + m.group(1) if m.group(1) else ''), text)
+    # Identical adjacent tokens: CH₂O CH₂O, Na₂CO₃ Na₂CO₃
+    text = re.sub(r'([A-Za-z0-9₀-₉⁰-⁹⁺⁻×.\[\]()]{2,})\s+\1(?![A-Za-z0-9₀-₉])', r'\1', text)
+    # Longer phrase doubling (6+ chars repeated)
     text = re.sub(r'(.{6,}?)\s*\1', r'\1', text)
+    # Leftover rendered ×¹⁰ → ×10
+    text = re.sub(r'×¹⁰', '×10', text)
     return text
 
 def aggressive_clean(text):
     if not text: return ""
+    text = text.replace('\ufeff', '').replace('\u200b', '')  # BOM + zero-width
     text = convert_to_english_numbers(text)
     text = latex_to_unicode(text)
     text = fix_vectors(text)
@@ -501,6 +513,10 @@ async def process_file(message, file_path, file_name):
             exp_div  = card.find('div', class_=lambda x: x and 'prose' in x)
             exp_text = format_content(exp_div, img_map) if exp_div else ""
 
+            # Skip empty cards (no question AND no options) — prevents empty first row
+            if not q_text.strip() and not any(o.strip() for o in options):
+                continue
+
             results.append({"questions":q_text,"option1":options[0],"option2":options[1],
                             "option3":options[2],"option4":options[3],"option5":"",
                             "answer":ans_idx,"explanation":exp_text,"type":1,"section":1})
@@ -559,6 +575,9 @@ async def process_file(message, file_path, file_name):
         if options[4].strip() and ans_idx=="5": options[3], ans_idx = options[4], "4"
 
         exp_text = format_content(exp_div, img_map) if exp_div else ""
+        # Skip empty cards (no question AND no options) — prevents empty first row
+        if not q_text.strip() and not any(o.strip() for o in options):
+            continue
         results.append({"questions":q_text,"option1":options[0],"option2":options[1],
                         "option3":options[2],"option4":options[3],"option5":"",
                         "answer":ans_idx,"explanation":exp_text,"type":1,"section":1})
@@ -604,10 +623,12 @@ async def handle_document(client, message):
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     await message.reply_text(
-        "🤖 **ATLAS Bot Ready!**\n\n"
+        f"🤖 **ATLAS Bot {BOT_VERSION}** ✅\n"
+        f"🔖 Build: `{BOT_BUILD}`\n\n"
         "📤 Send your `.mhtml` or `.html` file to extract MCQs.\n\n"
         f"🗝 ImgBB Keys: `{len(API_KEYS)} active`\n"
-        f"⚙️ Workers: `2 parallel`"
+        f"⚙️ Workers: `2 parallel`\n"
+        f"🔧 Fixes: LaTeX, Vector, Matrix, Anti-Doubling"
     )
 
 # ============================================================
@@ -615,7 +636,8 @@ async def start_cmd(client, message):
 # ============================================================
 if __name__ == "__main__":
     print("="*45)
-    print("🚀 ATLAS Ultimate Bot is Starting...")
+    print(f"🚀 ATLAS Ultimate Bot {BOT_VERSION} Starting...")
+    print(f"🔖 Build: {BOT_BUILD}")
     print("✅ Pyrogram Framework: Activated")
     print("✅ High-Speed Download: Enabled")
     print("✅ Twin-Worker System: Ready")
