@@ -1,0 +1,8 @@
+pyrogram==2.0.106
+tgcrypto
+pandas
+beautifulsoup4
+pillow
+requests
+openpyxl
+lxml
