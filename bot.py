@@ -31,8 +31,9 @@ current_key_index  = 0
 exhausted_keys     = set()
 processing_queue   = asyncio.Queue()
 is_processing      = False
-BOT_VERSION        = "v3.0"
-BOT_BUILD          = "2026-06-05-A"
+BOT_VERSION        = "v4.0"
+BOT_BUILD          = "2026-06-05-B"
+active_files       = set()  # Track files being processed to prevent duplicates
 
 # ============================================================
 # 2. UNICODE / LATEX MAPS
@@ -210,9 +211,19 @@ def fix_degrees(text):
     return text
 
 def fix_power_after_letter(text):
-    # E∝r2 → E∝r²  (bare digit after letter, not part of formula already processed)
+    # E∝r2 → E∝r² — but skip integral bound content ^(...)
+    # Protect ^(...) first
+    bound_contents = []
+    def protect(m):
+        bound_contents.append(m.group(0))
+        return f"PWRPROT{len(bound_contents)-1}END"
+    text = re.sub(r'\^\([^)]{1,40}\)', protect, text)
+    # Apply fix
     text = re.sub(r'(?<=[a-zA-Z])(\d+)(?![a-zA-Z₀-₉⁰-⁹\u0980-\u09FF])',
                   lambda m: m.group(1).translate(SUP_MAP), text)
+    # Restore
+    for i, b in enumerate(bound_contents):
+        text = text.replace(f"PWRPROT{i}END", b)
     return text
 
 def fix_chemical_misc(text):
@@ -262,21 +273,115 @@ def fix_doubling(text):
     text = re.sub(r'×¹⁰', '×10', text)
     return text
 
+def fix_int_notation(text):
+    """int₀^{pi/2} → ∫₀^(pi/2). Must run BEFORE latex_to_unicode.
+    Note: \\int is handled by LATEX_SYMBOLS, not here."""
+    text = re.sub(r'(?<!\\)\bint([₀₁₂₃₄₅₆₇₈₉]?)\^\{([^}]{1,30})\}', lambda m: f"∫{m.group(1)}^({m.group(2)})", text)
+    text = re.sub(r'(?<!\\)\bint([₀₁₂₃₄₅₆₇₈₉]?)⁽([^)⁾]{1,30})[)⁾]', lambda m: f"∫{m.group(1)}^({m.group(2)})", text)
+    text = re.sub(r'(?<!\\)\bint([₀₁₂₃₄₅₆₇₈₉]?)\(([^)]{1,30})\)', lambda m: f"∫{m.group(1)}^({m.group(2)})", text)
+    text = re.sub(r'(?<!\\)\bint(?=[₀₁₂₃₄₅₆₇₈₉⁰¹²³⁴⁵⁶⁷⁸⁹\^_∫])', '∫', text)
+    text = re.sub(r'(?<!\\)\bint\b', '∫', text)
+    return text
+
+def fix_integral_bounds(text):
+    """∫₀ lⁿ² → ∫₀^(ln2), ∫₀ ln2 → ∫₀^(ln2), ∫₀ π/⁴ → ∫₀π/4"""
+    # lⁿ digits → ln digits
+    text = re.sub(r'lⁿ([⁰¹²³⁴⁵⁶⁷⁸⁹]+)',
+                  lambda m: 'ln'+''.join(c.translate(str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹","0123456789")) for c in m.group(1)), text)
+    # ∫bound ln2 → ∫bound^(ln2)
+    text = re.sub(r'(∫[₀₁₂₃₄₅₆₇₈₉]*)\s+ln(\d+)',
+                  lambda m: f"{m.group(1)}^(ln{m.group(2)})", text)
+    # ∫₀ π/⁴ → ∫₀π/4
+    text = re.sub(r'(∫[₀₁₂₃₄₅₆₇₈₉]*)\s+π/([⁰¹²³⁴⁵⁶⁷⁸⁹]+)',
+                  lambda m: m.group(1)+'π/'+''.join(c.translate(str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹","0123456789")) for c in m.group(2)), text)
+    return text
+
+def fix_spaced_math(text):
+    """t a n → tan, s i n → sin, etc."""
+    for word in ['sin','cos','tan','cot','sec','csc','log','lim','exp','sqrt']:
+        spaced = r'\s+'.join(list(word))
+        text = re.sub(spaced, word, text, flags=re.IGNORECASE)
+    # Remove space between math function and single-char argument
+    text = re.sub(r'(sin|cos|tan|cot|sec|csc|ln|log)\s+([a-zA-Zθφψαβγ²³⁴⁵])\b', r'\1\2', text)
+    # ln/log space before (
+    text = re.sub(r'(ln|log)\s+\(', r'\1(', text)
+    return text
+
+def fix_ex_notation(text):
+    """xe x → xeˣ, e x → eˣ (math context)"""
+    text = re.sub(r'(?<![a-zA-Z])e\s+x(?!\w)', 'eˣ', text)
+    text = re.sub(r'(?<![a-zA-Z])e\s+-\s*x(?!\w)', 'e⁻ˣ', text)
+    text = re.sub(r'(?<=[0-9a-zA-Z)])\s*e\s+x(?!\w)', 'eˣ', text)
+    return text
+
+def fix_chemical_gaps(text):
+    """K 2 C r 2 O 7 → K₂Cr₂O₇, H 2 O → H₂O"""
+    # 2-letter element symbols with space: C r → Cr
+    elements_2 = ['Cr','Fe','Cu','Zn','Mn','Co','Ni','Ca','Mg','Na','Al','Si','Cl','Br','Hg','Pb','Sn']
+    for el in elements_2:
+        text = re.sub(rf'\b{el[0]}\s+{el[1]}\b', el, text)
+    # Element + space + subscript digit
+    text = re.sub(r'([A-Z][a-z]?)\s+(\d+)\s*(?=[A-Z()\[\]])',
+                  lambda m: m.group(1)+m.group(2).translate(SUB_MAP), text)
+    text = re.sub(r'([A-Z][a-z]?)\s+(\d+)(?!\w)',
+                  lambda m: m.group(1)+m.group(2).translate(SUB_MAP), text)
+    return text
+
+def fix_math_parens(text):
+    """Remove unnecessary spaces inside math parens, √ space"""
+    text = re.sub(r'√\s+', '√', text)
+    text = re.sub(r'\(\s+', '(', text)
+    text = re.sub(r'\s+\)', ')', text)
+    # Restore space after ) before Bengali/English words
+    text = re.sub(r'\)([a-zA-Z\u0980-\u09FF])', r') \1', text)
+    return text
+
+def fix_co2(text):
+    """CO² → CO₂ (wrong superscript)"""
+    text = re.sub(r'\bCO([²³⁴])',
+                  lambda m: 'CO'+m.group(1).translate(str.maketrans("²³⁴","234")).translate(SUB_MAP), text)
+    return text
+
 def aggressive_clean(text):
     if not text: return ""
-    text = text.replace('\ufeff', '').replace('\u200b', '')  # BOM + zero-width
+    text = text.replace('\ufeff', '').replace('\u200b', '')
     text = convert_to_english_numbers(text)
+
+    # Protect URLs from all transformations
+    url_store = []
+    def protect_url(m):
+        url_store.append(m.group(0))
+        return f"URLPROT{len(url_store)-1}URLEND"
+    text = re.sub(r'https?://[^\s"\'<>]+', protect_url, text)
+
+    # 1. int notation FIRST, protect bounds from latex processing
+    text = fix_int_notation(text)
+    text = fix_integral_bounds(text)
+    # Protect ∫ bounds from latex processing: ∫₀^(pi/2) → ∫₀IBOUND0IEND
+    bound_store = []
+    def protect_bound(m):
+        bound_store.append(m.group(2))
+        return f"{m.group(1)}IBOUND{len(bound_store)-1}IEND"
+    text = re.sub(r'(∫[₀₁₂₃₄₅₆₇₈₉]*)\^\(([^)]{1,40})\)', protect_bound, text)
+    # 2. LaTeX → Unicode (won't touch protected bounds)
     text = latex_to_unicode(text)
+    # Restore bounds — use ^(...) format instead of ^{...} to avoid legacy cleanup
+    for i, b in enumerate(bound_store):
+        text = text.replace(f"IBOUND{i}IEND", f"^({b})")
+    # 3. All other fixes
+    text = fix_spaced_math(text)
+    text = fix_chemical_gaps(text)
+    text = fix_co2(text)
     text = fix_vectors(text)
     text = fix_sci_notation(text)
     text = fix_degrees(text)
     text = fix_power_after_letter(text)
     text = fix_chemical_misc(text)
-    # legacy raw LaTeX cleanup (fallback)
+    text = fix_ex_notation(text)
+    text = fix_math_parens(text)
+    # legacy raw LaTeX cleanup (fallback - only _ subscript, not ^ to avoid breaking integral bounds)
     text = re.sub(r'_\{\s*([^}]+)\s*\}', lambda m: m.group(1).translate(SUB_MAP), text)
-    text = re.sub(r'\^\{\s*([^}]+)\s*\}', lambda m: m.group(1).translate(SUP_MAP), text)
     text = re.sub(r'_([0-9a-zA-Z+-]+)', lambda m: m.group(1).translate(SUB_MAP), text)
-    text = re.sub(r'\^([0-9a-zA-Z+-]+)', lambda m: m.group(1).translate(SUP_MAP), text)
     # sub letters back to normal where wrong (NₐHCO₃ → NaHCO₃)
     text = text.translate(str.maketrans("ₐₑₒₓₕₖₗₘₙₚₛₜ","aeoxhklmnpst"))
     text = text.replace('₍','(').replace('₎',')')
@@ -298,6 +403,9 @@ def aggressive_clean(text):
     text = re.sub(r'\\[a-zA-Z]+', ' ', text)
     text = re.sub(r'(?<![a-zA-Z<>/="])[{}](?![a-zA-Z<>/="])', '', text)
     text = re.sub(r'\s+', ' ', text)
+    # Restore URLs
+    for i, u in enumerate(url_store):
+        text = text.replace(f"URLPROT{i}URLEND", u)
     return text.strip()
 
 def build_matrix_html(rows):
@@ -436,7 +544,7 @@ async def update_dashboard(status_msg, file_name, idx, total, img_count, start_t
 async def worker(worker_id):
     global is_processing
     while True:
-        message, file_path, file_name = await processing_queue.get()
+        message, file_path, file_name, file_unique_id = await processing_queue.get()
         is_processing = True
         try:
             await process_file(message, file_path, file_name)
@@ -444,6 +552,7 @@ async def worker(worker_id):
             print(f"Worker error: {e}")
         finally:
             if os.path.exists(file_path): os.remove(file_path)
+            active_files.discard(file_unique_id)
             is_processing = False
             processing_queue.task_done()
 
@@ -607,17 +716,23 @@ app = Client("atlas_bot", api_id=API_ID, api_hash=API_HASH,
 async def handle_document(client, message):
     doc = message.document
     if not doc.file_name.endswith(('.html','.mhtml')): return
+    # Prevent duplicate: same file_unique_id = same file already queued
+    if doc.file_unique_id in active_files:
+        await message.reply_text("⏳ This file is already being processed.")
+        return
+    active_files.add(doc.file_unique_id)
     status_msg = await message.reply_text(f"📥 Preparing: `{doc.file_name}`...")
     start = time.time()
     try:
         file_path = await message.download(progress=progress, progress_args=(status_msg, start))
         await status_msg.edit_text(
             f"✅ Downloaded: `{doc.file_size/1048576:.2f} MB`\n⚙️ Processing...")
-        await processing_queue.put((message, file_path, doc.file_name))
+        await processing_queue.put((message, file_path, doc.file_name, doc.file_unique_id))
         pos = processing_queue.qsize()
         if pos > 1:
             await message.reply_text(f"⏳ Queue position: `{pos}`")
     except Exception as e:
+        active_files.discard(doc.file_unique_id)
         await status_msg.edit_text(f"❌ Download error: {e}")
 
 @app.on_message(filters.command("start") & filters.private)
@@ -643,6 +758,8 @@ if __name__ == "__main__":
     print("✅ Twin-Worker System: Ready")
     print("✅ LaTeX→Unicode + Matrix + Vector: Applied")
     print("✅ Anti-Doubling & Spacing Fix: Applied")
+    print("✅ Math/Integral/Chemical Fix: Applied")
+    print("✅ Duplicate Prevention: Active")
     print("✅ Live Premium Dashboard: Active")
     print("="*45)
     print("⌛ Waiting for files...")
