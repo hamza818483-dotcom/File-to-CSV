@@ -33,7 +33,16 @@ processing_queue   = asyncio.Queue()
 is_processing      = False
 BOT_VERSION        = "v4.0"
 BOT_BUILD          = "2026-06-05-B"
-active_files       = set()  # Track files being processed to prevent duplicates
+active_files       = set()
+
+# ============================================================
+# ACCESS CONTROL
+# ============================================================
+OWNER_ID           = 5341425626
+permitted_users    = {OWNER_ID}  # Owner always has access
+
+def is_allowed(user_id: int) -> bool:
+    return user_id in permitted_users
 
 # ============================================================
 # 2. UNICODE / LATEX MAPS
@@ -714,9 +723,11 @@ app = Client("atlas_bot", api_id=API_ID, api_hash=API_HASH,
 
 @app.on_message(filters.document & filters.private)
 async def handle_document(client, message):
+    if not is_allowed(message.from_user.id):
+        await message.reply_text("🚫 Access denied.")
+        return
     doc = message.document
     if not doc.file_name.endswith(('.html','.mhtml')): return
-    # Prevent duplicate: same file_unique_id = same file already queued
     if doc.file_unique_id in active_files:
         await message.reply_text("⏳ This file is already being processed.")
         return
@@ -737,6 +748,9 @@ async def handle_document(client, message):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
+    if not is_allowed(message.from_user.id):
+        await message.reply_text("🚫 Access denied.")
+        return
     await message.reply_text(
         f"🤖 **ATLAS Bot {BOT_VERSION}** ✅\n"
         f"🔖 Build: `{BOT_BUILD}`\n\n"
@@ -745,6 +759,43 @@ async def start_cmd(client, message):
         f"⚙️ Workers: `2 parallel`\n"
         f"🔧 Fixes: LaTeX, Vector, Matrix, Anti-Doubling"
     )
+
+@app.on_message(filters.command("permit") & filters.private)
+async def permit_cmd(client, message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply_text("🚫 Owner only.")
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.reply_text("Usage: `/permit <user_id>`")
+        return
+    uid = int(parts[1])
+    permitted_users.add(uid)
+    await message.reply_text(f"✅ User `{uid}` permitted.")
+
+@app.on_message(filters.command("revoke") & filters.private)
+async def revoke_cmd(client, message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply_text("🚫 Owner only.")
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.reply_text("Usage: `/revoke <user_id>`")
+        return
+    uid = int(parts[1])
+    if uid == OWNER_ID:
+        await message.reply_text("❌ Cannot revoke owner.")
+        return
+    permitted_users.discard(uid)
+    await message.reply_text(f"✅ User `{uid}` revoked.")
+
+@app.on_message(filters.command("users") & filters.private)
+async def users_cmd(client, message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply_text("🚫 Owner only.")
+        return
+    ulist = "\n".join(f"• `{u}`" + (" 👑 Owner" if u==OWNER_ID else "") for u in sorted(permitted_users))
+    await message.reply_text(f"📋 **Permitted Users:**\n{ulist}")
 
 # ============================================================
 # 11. MAIN
