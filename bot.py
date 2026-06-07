@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 # ============================================================
 API_ID            = int(os.environ.get("API_ID", "33312774"))
 API_HASH          = os.environ.get("API_HASH", "883db3366f8759d1d14c861c0d628232")
-TELEGRAM_BOT_TOKEN= os.environ.get("BOT_TOKEN", "8741087357:AAFu-cAdnYAqfvCvZbX7gIATJMMRR8bLOVA")
+TELEGRAM_BOT_TOKEN= os.environ.get("BOT_TOKEN", "8741087357:AAEQXzBQcCBbAfkC4-7eBWxWcoKqsuUNL2o")
 
 API_KEYS = [
     "a74dc88809cedadda845003a16bb4bc7",
